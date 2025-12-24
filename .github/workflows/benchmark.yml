@@ -72,6 +72,7 @@ jobs:
         run: |
           mkdir -p docs/benchmarks
           cp -r target/criterion/* docs/benchmarks/ || true
+          touch docs/benchmarks/.nojekyll
 
       - name: Generate benchmark summary
         run: |
