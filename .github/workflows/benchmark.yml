@@ -1,0 +1,143 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Run weekly on Sunday at midnight
+    - cron: '0 0 * * 0'
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://benchmark_user:benchmark_pass@localhost:5432/benchmark_db
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: benchmark_user
+          POSTGRES_PASSWORD: benchmark_pass
+          POSTGRES_DB: benchmark_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Initialize database
+        run: |
+          PGPASSWORD=benchmark_pass psql -h localhost -U benchmark_user -d benchmark_db -f init.sql
+
+      - name: Build
+        run: cargo build --release --benches
+
+      - name: Run benchmarks
+        run: |
+          cargo bench -- --noplot 2>&1 | tee benchmark-output.txt
+        continue-on-error: true
+
+      - name: Copy criterion results
+        run: |
+          mkdir -p docs/benchmarks
+          cp -r target/criterion/* docs/benchmarks/ || true
+
+      - name: Generate benchmark summary
+        run: |
+          echo "# Benchmark Results - $(date -u +%Y-%m-%d)" > docs/benchmarks/RESULTS.md
+          echo "" >> docs/benchmarks/RESULTS.md
+          echo "## Raw Output" >> docs/benchmarks/RESULTS.md
+          echo '```' >> docs/benchmarks/RESULTS.md
+          cat benchmark-output.txt >> docs/benchmarks/RESULTS.md
+          echo '```' >> docs/benchmarks/RESULTS.md
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            docs/benchmarks/
+            benchmark-output.txt
+          retention-days: 30
+
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/benchmarks
+          destination_dir: benchmarks
+
+  comment-on-pr:
+    needs: benchmark
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results
+
+      - name: Comment PR with results
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('benchmark-output.txt', 'utf8');
+            
+            // Extract key metrics
+            const lines = output.split('\n');
+            let summary = '## Benchmark Results\n\n';
+            summary += '| Benchmark | Time |\n';
+            summary += '|-----------|------|\n';
+            
+            let currentBench = '';
+            for (const line of lines) {
+              if (line.includes('Benchmarking ') && !line.includes('Warming') && !line.includes('Collecting')) {
+                currentBench = line.replace('Benchmarking ', '').trim();
+              }
+              if (line.includes('time:')) {
+                const match = line.match(/time:\s+\[[\d.]+ \w+ ([\d.]+ \w+)/);
+                if (match && currentBench) {
+                  summary += `| ${currentBench} | ${match[1]} |\n`;
+                  currentBench = '';
+                }
+              }
+            }
+            
+            summary += '\n<details><summary>Full Output</summary>\n\n```\n' + output.slice(0, 30000) + '\n```\n</details>';
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
