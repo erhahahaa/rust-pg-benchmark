@@ -1,0 +1,27 @@
+# Build artifacts
+/target/
+Cargo.lock
+*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Environment
+.env
+.env.*
+
+# Logs
+*.log
+
+# Coverage
+/coverage/
+
+# Benchmark results (local) - committed results go in docs/
+/benchmark-results-*/
+
+# Keep docs/benchmarks for GitHub Pages
+!docs/benchmarks/
